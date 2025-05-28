@@ -33,6 +33,36 @@ else:
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
+EXAMPLE_DOC_STRING = """
+    Examples:
+        ```py
+        >>> from diffusers import PhotoDoodlePipeline
+        >>> import torch
+
+        >>> pipeline = PhotoDoodlePipeline.from_pretrained("black-forest-labs/FLUX.1-dev",torch_dtype=torch.bfloat16))
+        >>> pipeline = pipeline.to("cuda")
+        >>> # Load initial model weights
+        >>> pipeline.load_lora_weights("nicolaus-huang/PhotoDoodle", weight_name="pretrain.safetensors")
+        >>> pipeline.fuse_lora()
+        >>> pipeline.unload_lora_weights()
+
+        >>> pipeline.load_lora_weights("nicolaus-huang/PhotoDoodle",weight_name="sksmagiceffects.safetensors")
+
+        >>> # Generate image with text prompt and condition image
+        >>> prompt = "add a halo and wings for the cat by sksmagiceffects"
+        >>> condition_image = load_image("./sample.png")  # PIL Image
+        >>> height=768
+        >>> width=512  
+        >>> # Prepare the input image
+        >>> condition_image = condition_image.resize((height, width)).convert("RGB")
+        >>> output = pipeline(prompt=prompt, condition_image=condition_image,num_inference_steps=28,guidance_scale=3.5)
+        >>> # Save the generated image
+        >>> output.images[0].save("photodoodle_results.png")
+        ```
+            
+"""
+
+
 def calculate_shift(
         image_seq_len,
         base_seq_len: int = 256,
@@ -47,8 +77,8 @@ def calculate_shift(
 
 def prepare_latent_image_ids_2(height, width, device, dtype):
     latent_image_ids = torch.zeros(height//2, width//2, 3, device=device, dtype=dtype)
-    latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height//2, device=device)[:, None]  # y coordinate
-    latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width//2, device=device)[None, :]   # x coordinate
+    latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height//2, device=device)[:, None]  # y坐标
+    latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width//2, device=device)[None, :]   # x坐标
     return latent_image_ids
 
 def position_encoding_clone(batch_size, original_height, original_width, device, dtype):
@@ -61,6 +91,7 @@ def position_encoding_clone(batch_size, original_height, original_width, device,
     latent_image_ids = torch.concat([latent_image_ids, cond_latent_image_ids], dim=-2)
     return latent_image_ids
 
+# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
         encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
 ):
@@ -73,6 +104,8 @@ def retrieve_latents(
     else:
         raise AttributeError("Could not access latents of provided encoder_output")
 
+
+# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
         scheduler,
         num_inference_steps: Optional[int] = None,
@@ -81,7 +114,29 @@ def retrieve_timesteps(
         sigmas: Optional[List[float]] = None,
         **kwargs,
 ):
-    """Retrieve timesteps from scheduler and handle custom timesteps/sigmas."""
+    """
+    Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
+    custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
+
+    Args:
+        scheduler (`SchedulerMixin`):
+            The scheduler to get timesteps from.
+        num_inference_steps (`int`):
+            The number of diffusion steps used when generating samples with a pre-trained model. If used, `timesteps`
+            must be `None`.
+        device (`str` or `torch.device`, *optional*):
+            The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
+        timesteps (`List[int]`, *optional*):
+            Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
+            `num_inference_steps` and `sigmas` must be `None`.
+        sigmas (`List[float]`, *optional*):
+            Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
+            `num_inference_steps` and `timesteps` must be `None`.
+
+    Returns:
+        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        second element is the number of inference steps.
+    """
     if timesteps is not None and sigmas is not None:
         raise ValueError("Only one of `timesteps` or `sigmas` can be passed. Please choose one to set custom values")
     if timesteps is not None:
@@ -109,12 +164,12 @@ def retrieve_timesteps(
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
 
+
 class PhotoDoodlePipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFileMixin):
     r"""
-    PhotoDoodle pipeline for image generation.
+    The Flux pipeline for text-to-image generation.
 
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods
-    implemented for all pipelines.
+    Reference: https://blackforestlabs.ai/announcing-black-forest-labs/
 
     Args:
         transformer ([`FluxTransformer2DModel`]):
@@ -124,13 +179,17 @@ class PhotoDoodlePipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         vae ([`AutoencoderKL`]):
             Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
         text_encoder ([`CLIPTextModel`]):
-            Frozen text-encoder ([clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14)).
+            [CLIP](https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPTextModel), specifically
+            the [clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) variant.
         text_encoder_2 ([`T5EncoderModel`]):
-            Second frozen text encoder ([t5-v1_1-xxl](https://huggingface.co/google/t5-v1_1-xxl)).
+            [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5EncoderModel), specifically
+            the [google/t5-v1_1-xxl](https://huggingface.co/google/t5-v1_1-xxl) variant.
         tokenizer (`CLIPTokenizer`):
-            A tokenizer for the text encoder.
+            Tokenizer of class
+            [CLIPTokenizer](https://huggingface.co/docs/transformers/en/model_doc/clip#transformers.CLIPTokenizer).
         tokenizer_2 (`T5TokenizerFast`):
-            A tokenizer for the second text encoder.
+            Second Tokenizer of class
+            [T5TokenizerFast](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5TokenizerFast).
     """
 
     model_cpu_offload_seq = "text_encoder->text_encoder_2->transformer->vae"
@@ -266,7 +325,6 @@ class PhotoDoodlePipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
             lora_scale: Optional[float] = None,
     ):
         r"""
-        Encodes the prompt into text encoder hidden states.
 
         Args:
             prompt (`str` or `List[str]`, *optional*):
@@ -333,6 +391,101 @@ class PhotoDoodlePipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(device=device, dtype=dtype)
 
         return prompt_embeds, pooled_prompt_embeds, text_ids
+
+    # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_inpaint.StableDiffusion3InpaintPipeline._encode_vae_image
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+        if isinstance(generator, list):
+            image_latents = [
+                retrieve_latents(self.vae.encode(image[i: i + 1]), generator=generator[i])
+                for i in range(image.shape[0])
+            ]
+            image_latents = torch.cat(image_latents, dim=0)
+        else:
+            image_latents = retrieve_latents(self.vae.encode(image), generator=generator)
+
+        image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+
+        return image_latents
+
+    def check_inputs(
+            self,
+            prompt,
+            prompt_2,
+            height,
+            width,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            callback_on_step_end_tensor_inputs=None,
+            max_sequence_length=None,
+    ):
+        if height % 8 != 0 or width % 8 != 0:
+            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
+
+        if callback_on_step_end_tensor_inputs is not None and not all(
+                k in self._callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
+        ):
+            raise ValueError(
+                f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in self._callback_tensor_inputs]}"
+            )
+
+        if prompt is not None and prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+                " only forward one of the two."
+            )
+        elif prompt_2 is not None and prompt_embeds is not None:
+            raise ValueError(
+                f"Cannot forward both `prompt_2`: {prompt_2} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
+                " only forward one of the two."
+            )
+        elif prompt is None and prompt_embeds is None:
+            raise ValueError(
+                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
+            )
+        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
+            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
+        elif prompt_2 is not None and (not isinstance(prompt_2, str) and not isinstance(prompt_2, list)):
+            raise ValueError(f"`prompt_2` has to be of type `str` or `list` but is {type(prompt_2)}")
+
+        if prompt_embeds is not None and pooled_prompt_embeds is None:
+            raise ValueError(
+                "If `prompt_embeds` are provided, `pooled_prompt_embeds` also have to be passed. Make sure to generate `pooled_prompt_embeds` from the same text encoder that was used to generate `prompt_embeds`."
+            )
+
+        if max_sequence_length is not None and max_sequence_length > 512:
+            raise ValueError(f"`max_sequence_length` cannot be greater than 512 but is {max_sequence_length}")
+
+    @staticmethod
+    def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
+        latent_image_ids = torch.zeros(height // 2, width // 2, 3)
+        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width // 2)[None, :]
+        latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
+        latent_image_ids = latent_image_ids.reshape(
+            latent_image_id_height * latent_image_id_width, latent_image_id_channels
+        )
+        return latent_image_ids.to(device=device, dtype=dtype)
+
+    @staticmethod
+    def _pack_latents(latents, batch_size, num_channels_latents, height, width):
+        latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
+        latents = latents.permute(0, 2, 4, 1, 3, 5)
+        latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
+        return latents
+
+    @staticmethod
+    def _unpack_latents(latents, height, width, vae_scale_factor):
+        batch_size, num_patches, channels = latents.shape
+
+        height = height // vae_scale_factor
+        width = width // vae_scale_factor
+
+        latents = latents.view(batch_size, height, width, channels // 4, 2, 2)
+        latents = latents.permute(0, 3, 1, 4, 2, 5)
+
+        latents = latents.reshape(batch_size, channels // (2 * 2), height * 2, width * 2)
+
+        return latents
 
     def enable_vae_slicing(self):
         r"""
@@ -403,6 +556,7 @@ class PhotoDoodlePipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
             else:
                 image_latents = torch.cat([image_latents], dim=0)
 
+        # import pdb; pdb.set_trace()
         latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)  
         latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
         cond_latents = self._pack_latents(image_latents, batch_size, num_channels_latents, height, width)
@@ -610,4 +764,4 @@ class PhotoDoodlePipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         if not return_dict:
             return (image,)
 
-        return FluxPipelineOutput(images=image) 
+        return FluxPipelineOutput(images=image)
