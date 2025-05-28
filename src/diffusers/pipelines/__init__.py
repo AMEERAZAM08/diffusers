@@ -30,6 +30,7 @@ _import_structure = {
     "ledits_pp": [],
     "marigold": [],
     "pag": [],
+    "photodoodle": [],
     "stable_diffusion": [],
     "stable_diffusion_xl": [],
 }
@@ -53,6 +54,7 @@ else:
     _import_structure["ddpm"] = ["DDPMPipeline"]
     _import_structure["dit"] = ["DiTPipeline"]
     _import_structure["latent_diffusion"].extend(["LDMSuperResolutionPipeline"])
+    _import_structure["photodoodle"].extend(["PhotoDoodlePipeline"])
     _import_structure["pipeline_utils"] = [
         "AudioPipelineOutput",
         "DiffusionPipeline",
@@ -286,6 +288,7 @@ else:
     _import_structure["mochi"] = ["MochiPipeline"]
     _import_structure["musicldm"] = ["MusicLDMPipeline"]
     _import_structure["omnigen"] = ["OmniGenPipeline"]
+    _import_structure["photodoodle"].extend(["PhotoDoodlePipeline"])
     _import_structure["visualcloze"] = ["VisualClozePipeline", "VisualClozeGenerationPipeline"]
     _import_structure["paint_by_example"] = ["PaintByExamplePipeline"]
     _import_structure["pia"] = ["PIAPipeline"]
@@ -492,6 +495,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .deprecated import KarrasVePipeline, LDMPipeline, PNDMPipeline, RePaintPipeline, ScoreSdeVePipeline
         from .dit import DiTPipeline
         from .latent_diffusion import LDMSuperResolutionPipeline
+        from .photodoodle import PhotoDoodlePipeline
         from .pipeline_utils import (
             AudioPipelineOutput,
             DiffusionPipeline,
